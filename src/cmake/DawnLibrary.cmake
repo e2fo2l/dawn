@@ -180,12 +180,12 @@ function(dawn_install_target name)
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
   )
   # When building in debug mode with MSVC, install PDB files together with binaries
-  if (MSVC)
+  if (MSVC AND BUILD_SHARED_LIBS)
     get_target_property(target_type "${name}" TYPE)
     if ((target_type STREQUAL "STATIC_LIBRARY") OR (target_type STREQUAL "SHARED_LIBRARY") OR (target_type STREQUAL "EXECUTABLE"))
       install(FILES $<TARGET_PDB_FILE:${name}> DESTINATION ${CMAKE_INSTALL_BINDIR} OPTIONAL)
     endif()
-  endif (MSVC)
+  endif (MSVC AND BUILD_SHARED_LIBS)
 
   # Automatically determine where each header should go based on its subdirectory in the include dir.
   foreach(header IN LISTS arg_HEADERS)
