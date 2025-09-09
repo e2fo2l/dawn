@@ -29,7 +29,6 @@
 
 #include <algorithm>
 #include <limits>
-#include <set>
 #include <sstream>
 #include <utility>
 
@@ -90,6 +89,9 @@ BindingInfoType TintResourceTypeToBindingInfoType(
         case tint::inspector::ResourceBinding::ResourceType::kReadOnlyStorageTexture:
         case tint::inspector::ResourceBinding::ResourceType::kReadWriteStorageTexture:
             return BindingInfoType::StorageTexture;
+        case tint::inspector::ResourceBinding::ResourceType::kReadOnlyTexelBuffer:
+        case tint::inspector::ResourceBinding::ResourceType::kReadWriteTexelBuffer:
+            return BindingInfoType::TexelBuffer;
         case tint::inspector::ResourceBinding::ResourceType::kExternalTexture:
             return BindingInfoType::ExternalTexture;
         case tint::inspector::ResourceBinding::ResourceType::kInputAttachment:
@@ -288,6 +290,19 @@ ResultOrError<wgpu::StorageTextureAccess> TintResourceTypeToStorageTextureAccess
             return wgpu::StorageTextureAccess::ReadWrite;
         default:
             return DAWN_VALIDATION_ERROR("Attempted to convert non-storage texture resource type");
+    }
+    DAWN_UNREACHABLE();
+}
+
+ResultOrError<wgpu::TexelBufferAccess> TintResourceTypeToTexelBufferAccess(
+    tint::inspector::ResourceBinding::ResourceType resource_type) {
+    switch (resource_type) {
+        case tint::inspector::ResourceBinding::ResourceType::kReadOnlyTexelBuffer:
+            return wgpu::TexelBufferAccess::ReadOnly;
+        case tint::inspector::ResourceBinding::ResourceType::kReadWriteTexelBuffer:
+            return wgpu::TexelBufferAccess::ReadWrite;
+        default:
+            return DAWN_VALIDATION_ERROR("Attempted to convert non-texel buffer resource type");
     }
     DAWN_UNREACHABLE();
 }
@@ -577,6 +592,7 @@ BindingInfoType GetShaderBindingType(const ShaderBindingInfo& shaderInfo) {
         [](const SamplerBindingInfo&) { return BindingInfoType::Sampler; },
         [](const TextureBindingInfo&) { return BindingInfoType::Texture; },
         [](const StorageTextureBindingInfo&) { return BindingInfoType::StorageTexture; },
+        [](const TexelBufferBindingInfo&) { return BindingInfoType::TexelBuffer; },
         [](const ExternalTextureBindingInfo&) { return BindingInfoType::ExternalTexture; },
         [](const InputAttachmentBindingInfo&) { return BindingInfoType::InputAttachment; });
 }
@@ -696,6 +712,23 @@ MaybeError ValidateCompatibilityOfSingleBindingWithLayout(const DeviceBase* devi
                             "The layout's binding dimension (%s) doesn't match the "
                             "shader's binding dimension (%s).",
                             bindingLayout.viewDimension, bindingInfo.viewDimension);
+            return {};
+        },
+        [&](const TexelBufferBindingInfo& bindingInfo) -> MaybeError {
+            const TexelBufferBindingInfo& bindingLayout =
+                std::get<TexelBufferBindingInfo>(layoutInfo.bindingLayout);
+            DAWN_ASSERT(bindingLayout.format != wgpu::TextureFormat::Undefined);
+            DAWN_ASSERT(bindingInfo.format != wgpu::TextureFormat::Undefined);
+
+            DAWN_INVALID_IF(bindingLayout.access != bindingInfo.access,
+                            "The layout's binding access (%s) doesn't match the shader's binding "
+                            "access (%s).",
+                            bindingLayout.access, bindingInfo.access);
+
+            DAWN_INVALID_IF(bindingLayout.format != bindingInfo.format,
+                            "The layout's binding format (%s) doesn't match the shader's binding "
+                            "format (%s).",
+                            bindingLayout.format, bindingInfo.format);
             return {};
         },
         [&](const BufferBindingInfo& bindingInfo) -> MaybeError {
@@ -1204,6 +1237,16 @@ ResultOrError<std::unique_ptr<EntryPointMetadata>> ReflectEntryPointUsingTint(
                 break;
             }
 
+            case BindingInfoType::TexelBuffer: {
+                TexelBufferBindingInfo bindingInfo = {};
+                DAWN_TRY_ASSIGN(bindingInfo.access,
+                                TintResourceTypeToTexelBufferAccess(resource.resource_type));
+                bindingInfo.format = TintImageFormatToTextureFormat(resource.image_format);
+
+                info.bindingInfo = bindingInfo;
+                break;
+            }
+
             case BindingInfoType::ExternalTexture: {
                 info.bindingInfo.emplace<ExternalTextureBindingInfo>();
                 break;
@@ -1323,44 +1366,6 @@ ResultOrError<std::unique_ptr<EntryPointMetadata>> ReflectEntryPointUsingTint(
                    std::back_inserter(metadata->textureQueries), FromTintLevelSampleInfo);
 
     metadata->usesSubgroupMatrix = entryPoint.uses_subgroup_matrix;
-
-    // Compute the texture+sampler combination count.
-    if (deviceInfo.isCompatibilityMode) {
-        // separate sampled from non-sampled and put sampled in set
-        std::set<tint::BindingPoint> sampledTextures;
-        std::set<tint::BindingPoint> sampledExternalTextures;
-        std::vector<tint::BindingPoint> nonSampled;
-        uint32_t numSamplerTexturePairs = 0;
-        uint32_t numSamplerExternalTexturePairs = 0;
-
-        for (const auto& pair : samplerAndNonSamplerTextureUses) {
-            const auto& bindingGroupInfoMap =
-                metadata->bindings[BindGroupIndex(pair.texture_binding_point.group)];
-            const auto it =
-                bindingGroupInfoMap.find(BindingNumber(pair.texture_binding_point.binding));
-            auto isExternalTexture =
-                std::holds_alternative<ExternalTextureBindingInfo>(it->second.bindingInfo);
-            if (isExternalTexture) {
-                ++numSamplerExternalTexturePairs;
-                sampledExternalTextures.insert(pair.texture_binding_point);
-            } else if (pair.sampler_binding_point == tintNonSamplerBindingPoint) {
-                nonSampled.push_back(pair.texture_binding_point);
-            } else {
-                ++numSamplerTexturePairs;
-                sampledTextures.insert(pair.texture_binding_point);
-            }
-        }
-
-        // count the number of non-sampled that are not referenced by sampled pairs.
-        auto numNonSampled =
-            std::count_if(nonSampled.begin(), nonSampled.end(),
-                          [&](const tint::BindingPoint& nonSampledBindingPoint) {
-                              return !sampledTextures.contains(nonSampledBindingPoint);
-                          });
-        metadata->numTextureSamplerCombinations = numSamplerTexturePairs + numNonSampled +
-                                                  numSamplerExternalTexturePairs * 3 +
-                                                  sampledExternalTextures.size();
-    }
 
 #undef DelayedInvalidIf
     return std::move(metadata);
@@ -1751,6 +1756,10 @@ ShaderModuleBase::ShaderModuleBase(DeviceBase* device,
         mOriginalSpirv.assign(spirvDesc->code, spirvDesc->code + spirvDesc->codeSize);
         shaderCodeByteSize = mOriginalSpirv.size() * sizeof(decltype(mOriginalSpirv)::value_type);
         shaderCode = reinterpret_cast<uint8_t*>(mOriginalSpirv.data());
+        if (auto* spirvOptions = descriptor.Get<DawnShaderModuleSPIRVOptionsDescriptor>()) {
+            mAllowSpirvNonUniformDerivitives =
+                static_cast<bool>(spirvOptions->allowNonUniformDerivatives);
+        }
     } else if (auto* wgslDesc = descriptor.Get<ShaderSourceWGSL>()) {
         mType = Type::Wgsl;
         mWgsl = std::string(wgslDesc->code);
@@ -1767,6 +1776,7 @@ ShaderModuleBase::ShaderModuleBase(DeviceBase* device,
     ShaderModuleHasher hasher;
     // Hash the metadata.
     hasher.Update(mType);
+    hasher.Update(mAllowSpirvNonUniformDerivitives);
     // mStrictMath is a std::optional<bool>, and the bool value might not get initialized by default
     // constructor and thus contains dirty data.
     bool strictMathAssigned = mStrictMath.has_value();
@@ -1888,9 +1898,14 @@ Ref<TintProgram> ShaderModuleBase::GetTintProgram() {
         ShaderModuleDescriptor descriptor;
         ShaderSourceWGSL wgslDescriptor;
         ShaderSourceSPIRV spirvDescriptor;
+        DawnShaderModuleSPIRVOptionsDescriptor spirvOptionsDescriptor;
 
         switch (mType) {
             case Type::Spirv:
+                spirvOptionsDescriptor.allowNonUniformDerivatives =
+                    mAllowSpirvNonUniformDerivitives;
+                spirvDescriptor.nextInChain = &spirvOptionsDescriptor;
+
                 spirvDescriptor.codeSize = mOriginalSpirv.size();
                 spirvDescriptor.code = mOriginalSpirv.data();
                 descriptor.nextInChain = &spirvDescriptor;

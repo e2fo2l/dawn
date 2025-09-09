@@ -63,6 +63,7 @@ enum class BindingInfoType {
     Sampler,
     Texture,
     StorageTexture,
+    TexelBuffer,
     ExternalTexture,
     StaticSampler,
     // Internal to vulkan only.
@@ -101,6 +102,15 @@ DAWN_SERIALIZABLE(struct, StorageTextureBindingInfo, STORAGE_TEXTURE_BINDING_INF
     static StorageTextureBindingInfo From(const StorageTextureBindingLayout& layout);
 };
 #undef STORAGE_TEXTURE_BINDING_INFO_MEMBER
+
+// A mirror of wgpu::TexelBufferBindingLayout for use inside dawn::native.
+#define TEXEL_BUFFER_BINDING_INFO_MEMBER(X) \
+    X(wgpu::TextureFormat, format)          \
+    X(wgpu::TexelBufferAccess, access)
+DAWN_SERIALIZABLE(struct, TexelBufferBindingInfo, TEXEL_BUFFER_BINDING_INFO_MEMBER) {
+    static TexelBufferBindingInfo From(const TexelBufferBindingLayout& layout);
+};
+#undef TEXEL_BUFFER_BINDING_INFO_MEMBER
 
 // A mirror of wgpu::SamplerBindingLayout for use inside dawn::native.
 #define SAMPLER_BINDING_INFO_MEMBER(X)                                               \
@@ -149,6 +159,7 @@ struct BindingInfo {
     std::variant<BufferBindingInfo,
                  SamplerBindingInfo,
                  TextureBindingInfo,
+                 TexelBufferBindingInfo,
                  StorageTextureBindingInfo,
                  StaticSamplerBindingInfo,
                  InputAttachmentBindingInfo>
@@ -163,7 +174,27 @@ BindingInfoType GetBindingInfoType(const BindingInfo& bindingInfo);
 #define BINDING_SLOT_MEMBER(X) \
     X(BindGroupIndex, group)   \
     X(BindingNumber, binding)
-DAWN_SERIALIZABLE(struct, BindingSlot, BINDING_SLOT_MEMBER){};
+// clang-format off
+DAWN_SERIALIZABLE(struct, BindingSlot, BINDING_SLOT_MEMBER){
+    constexpr bool operator==(const BindingSlot& rhs) const {
+        return group == rhs.group && binding == rhs.binding;
+    }
+
+    constexpr bool operator!=(const BindingSlot& rhs) const {
+        return !(*this == rhs);
+    }
+
+    constexpr bool operator<(const BindingSlot& rhs) const {
+        if (group < rhs.group) {
+            return true;
+        }
+        if (group > rhs.group) {
+            return false;
+        }
+        return binding < rhs.binding;
+    }
+};
+// clang-format on
 #undef BINDING_SLOT_MEMBER
 
 struct PerStageBindingCounts {

@@ -186,10 +186,13 @@ MaybeError ExecutionQueueBase::UpdateCompletedSerial() {
     return {};
 }
 
+// Tasks may execute synchronously if the given serial has already passed or during device
+// destruction. As a result, callers should ensure that the calling thread releases any locks that
+// will be taken by the task prior to calling TrackSerialTask.
 void ExecutionQueueBase::TrackSerialTask(ExecutionSerial serial, Task&& task) {
     {
         std::lock_guard<std::mutex> lock(mMutex);
-        if (serial > GetCompletedCommandSerial()) {
+        if (!mAssumeCompleted && serial > GetCompletedCommandSerial()) {
             mWaitingTasks.Enqueue(std::move(task), serial);
             return;
         }
@@ -198,6 +201,11 @@ void ExecutionQueueBase::TrackSerialTask(ExecutionSerial serial, Task&& task) {
 }
 
 void ExecutionQueueBase::UpdateCompletedSerialTo(ExecutionSerial completedSerial) {
+    UpdateCompletedSerialToInternal(completedSerial);
+}
+
+void ExecutionQueueBase::UpdateCompletedSerialToInternal(ExecutionSerial completedSerial,
+                                                         bool forceTasks) {
     std::vector<Task> tasks;
     {
         std::unique_lock<std::mutex> lock(mMutex);
@@ -206,7 +214,7 @@ void ExecutionQueueBase::UpdateCompletedSerialTo(ExecutionSerial completedSerial
         // that we almost always process as many callbacks as possible.
         FetchMax(mCompletedSerial, uint64_t(completedSerial));
 
-        if (mWaitingForIdle) {
+        if (mWaitingForIdle && !forceTasks) {
             // If we are waiting for idle, then the callbacks will be fired there. It is currently
             // necessary to avoid calling the callbacks in this function and doing it in the
             // |WaitForIdleForDestruction| call because |WaitForIdleForDestruction| is called while
@@ -264,12 +272,19 @@ MaybeError ExecutionQueueBase::SubmitPendingCommands() {
 }
 
 void ExecutionQueueBase::AssumeCommandsComplete() {
+    {
+        std::unique_lock<std::mutex> lock(mMutex);
+        // Any tasks that get scheduled after this call are executed immediately.
+        mAssumeCompleted = true;
+    }
     // Bump serials so any pending callbacks can be fired.
     // TODO(crbug.com/dawn/831): This is called during device destroy, which is not
     // thread-safe yet. Two threads calling destroy would race setting these serials.
     ExecutionSerial completed =
         ExecutionSerial(mLastSubmittedSerial.fetch_add(1u, std::memory_order_release) + 1);
-    UpdateCompletedSerialTo(completed);
+    // Force any waiting tasks to execute. This will ensure that any tasks that were scheduled
+    // after WaitForIdleForDestruction being called are completed.
+    UpdateCompletedSerialToInternal(completed, true);
 }
 
 void ExecutionQueueBase::IncrementLastSubmittedCommandSerial() {

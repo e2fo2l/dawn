@@ -35,6 +35,7 @@
 
 #include "dawn/common/MutexProtected.h"
 #include "dawn/common/SerialMap.h"
+#include "dawn/common/Time.h"
 #include "dawn/native/Error.h"
 #include "dawn/native/IntegerTypes.h"
 #include "dawn/native/ObjectBase.h"
@@ -143,6 +144,8 @@ class ExecutionQueueBase : public ApiObjectBase {
     // Submit any pending commands that are enqueued.
     virtual MaybeError SubmitPendingCommandsImpl() = 0;
 
+    void UpdateCompletedSerialToInternal(ExecutionSerial completedSerial, bool forceTasks = false);
+
     // |mCompletedSerial| tracks the last completed command serial that the fence has returned. This
     // is currently implicitly guarded by the lock for |mWaitingTasks| since we only update this
     // value when holding that lock.
@@ -161,6 +164,7 @@ class ExecutionQueueBase : public ApiObjectBase {
     std::condition_variable mCv;
     bool mCallingCallbacks = false;
     bool mWaitingForIdle = false;
+    bool mAssumeCompleted = false;
     SerialMap<ExecutionSerial, Task> mWaitingTasks;
 };
 

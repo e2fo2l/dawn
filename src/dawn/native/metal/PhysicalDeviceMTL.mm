@@ -29,7 +29,6 @@
 
 #include "dawn/common/CoreFoundationRef.h"
 #include "dawn/common/GPUInfo.h"
-#include "dawn/common/GPUInfo_autogen.h"
 #include "dawn/common/Log.h"
 #include "dawn/common/NSRef.h"
 #include "dawn/common/Platform.h"
@@ -447,6 +446,11 @@ void PhysicalDevice::SetupBackendDeviceToggles(dawn::platform::Platform* platfor
     // chromium:407109055: Signed unpacking is inaccurate on AMD only.
     if (gpu_info::IsAMD(vendorId)) {
         deviceToggles->Default(Toggle::MetalPolyfillUnpack2x16snorm, true);
+    }
+
+    // chromium:407109056: Floating point clamp is slightly inaccurate for subnormal values.
+    if (gpu_info::IsAMD(vendorId)) {
+        deviceToggles->Default(Toggle::MetalPolyfillClampFloat, true);
     }
 
     // On some Intel GPUs vertex only render pipeline get wrong depth result if no fragment
@@ -898,6 +902,10 @@ MaybeError PhysicalDevice::InitializeSupportedLimitsImpl(CombinedLimits* limits)
     // buffer size.
     limits->v1.maxUniformBufferBindingSize = maxBufferSize;
     limits->v1.maxStorageBufferBindingSize = maxBufferSize;
+
+    // Metal doesn't have limits for SetBytes, only suggested less than 4096 bytes.
+    // The size is large enough to support 64 bytes customer immediate data.
+    limits->v1.maxImmediateSize = kMaxSupportedImmediateDataBytes;
 
     // Using base limits for:
     // TODO(crbug.com/dawn/685):

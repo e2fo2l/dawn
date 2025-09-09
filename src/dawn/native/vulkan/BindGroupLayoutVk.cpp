@@ -222,6 +222,12 @@ VkDescriptorType VulkanDescriptorType(const BindingInfo& bindingInfo) {
         },
         [](const TextureBindingInfo&) { return VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE; },
         [](const StorageTextureBindingInfo&) { return VK_DESCRIPTOR_TYPE_STORAGE_IMAGE; },
+        [](const TexelBufferBindingInfo&) {
+            // TODO(crbug/382544164): Prototype texel buffer feature
+            DAWN_UNREACHABLE();
+            return VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER;
+        },
+
         [](const InputAttachmentBindingInfo&) { return VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT; });
 }
 
@@ -370,11 +376,7 @@ MaybeError BindGroupLayoutDynamicArray::Initialize() {
     mStaticDescriptorCountPerType = std::move(staticBindings.descriptorCountPerType);
     std::vector<VkDescriptorSetLayoutBinding> bindings = std::move(staticBindings.bindings);
 
-    // TODO(https://crbug.com/435317394): Add the storage buffer that will be used for availability
-    // information.
-
     // Add the last binding, which is the dynamic array.
-    // TODO(https://crbug.com/435317394): Used a packed index instead of the BindingNumber here.
     VkDescriptorSetLayoutBinding dynamicArray{
         .binding = uint32_t(GetDynamicArrayStart()),
         .descriptorType = VulkanDescriptorType(GetDynamicArrayKind()),

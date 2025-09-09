@@ -188,6 +188,7 @@ using ShaderBindingInfoVariant = std::variant<BufferBindingInfo,
                                               SamplerBindingInfo,
                                               TextureBindingInfo,
                                               StorageTextureBindingInfo,
+                                              TexelBufferBindingInfo,
                                               ExternalTextureBindingInfo,
                                               InputAttachmentBindingInfo>;
 #define SHADER_BINDING_INFO_MEMBER(X)              \
@@ -329,11 +330,7 @@ using OverridesMap = absl::flat_hash_map<std::string, Override>;
     X(bool, usesDepthTextureWithNonComparisonSampler)                                             \
     X(bool, usesSubgroupMatrix)                                                                   \
     /* Immediate Data block byte size */                                                          \
-    X(uint32_t, immediateDataRangeByteSize)                                                       \
-    /* Number of texture+sampler combinations, computed as 1 for every texture+sampler         */ \
-    /* combination + 1 for every texture used without a sampler that wasn't previously counted.*/ \
-    /* Note: this is only set in compatibility mode.                                           */ \
-    X(uint32_t, numTextureSamplerCombinations)
+    X(uint32_t, immediateDataRangeByteSize)
 DAWN_SERIALIZABLE(struct, EntryPointMetadata, ENTRY_POINT_METADATA_MEMBER) {
     using SamplerTexturePair = detail::SamplerTexturePair;
     // TODO(crbug.com/409438000): Remove the hack of sampler placeholders for non-sampler texture.
@@ -437,8 +434,9 @@ class ShaderModuleBase : public RefCountedWithExternalCount<ApiObjectBase>,
     void WillDropLastExternalRef() override;
 
     // The original data in the descriptor for caching.
-    enum class Type { Undefined, Spirv, Wgsl };
+    enum class Type : uint8_t { Undefined, Spirv, Wgsl };
     Type mType;
+    bool mAllowSpirvNonUniformDerivitives = false;
     std::vector<uint32_t> mOriginalSpirv;
     std::string mWgsl;
 

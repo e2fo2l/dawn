@@ -247,6 +247,12 @@ void DawnTestEnvironment::ParseArgs(int argc, char** argv) {
             continue;
         }
 
+        // This is passed in by the bots on the dawn CQ for dawn end2end tests.
+        if (strcmp("--test-launcher-bot-mode", argv[i]) == 0) {
+            mIsTestLauncherBotMode = true;
+            continue;
+        }
+
         constexpr const char kEnableBackendValidationSwitch[] = "--enable-backend-validation";
         argLen = sizeof(kEnableBackendValidationSwitch) - 1;
         if (strncmp(argv[i], kEnableBackendValidationSwitch, argLen) == 0) {
@@ -702,6 +708,10 @@ bool DawnTestEnvironment::RunSuppressedTests() const {
     return mRunSuppressedTests;
 }
 
+bool DawnTestEnvironment::IsTestLauncherBotMode() const {
+    return mIsTestLauncherBotMode;
+}
+
 native::BackendValidationLevel DawnTestEnvironment::GetBackendValidationLevel() const {
     return mBackendValidationLevel;
 }
@@ -1056,6 +1066,10 @@ bool DawnTestBase::IsCPU() const {
 
 bool DawnTestBase::RunSuppressedTests() const {
     return gTestEnv->RunSuppressedTests();
+}
+
+bool DawnTestBase::IsTestLauncherBotMode() const {
+    return gTestEnv->IsTestLauncherBotMode();
 }
 
 bool DawnTestBase::IsDXC() const {
@@ -1785,20 +1799,12 @@ void DawnTestBase::WaitABit(wgpu::Instance targetInstance) {
 void DawnTestBase::FlushWire() {
     if (gTestEnv->UsesWire()) {
         bool C2SFlushed = mWireHelper->FlushClient();
-        bool S2CFlushed = mWireHelper->FlushServer();
         DAWN_ASSERT(C2SFlushed);
-        DAWN_ASSERT(S2CFlushed);
     }
 }
 
 void DawnTestBase::WaitForAllOperations() {
-    do {
-        FlushWire();
-        if (UsesWire() && instance != nullptr) {
-            instance.ProcessEvents();
-        }
-    } while (dawn::native::InstanceProcessEvents(gTestEnv->GetInstance()->Get()) ||
-             !mWireHelper->IsIdle());
+    mWireHelper->WaitUntilIdle(gTestEnv->GetInstance(), instance);
 }
 
 DawnTestBase::ReadbackReservation DawnTestBase::ReserveReadback(wgpu::Device targetDevice,

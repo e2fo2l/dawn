@@ -81,6 +81,7 @@
 #include "src/tint/lang/core/ir/user_call.h"
 #include "src/tint/lang/core/ir/var.h"
 #include "src/tint/lang/core/type/array.h"
+#include "src/tint/lang/core/type/binding_array.h"
 #include "src/tint/lang/core/type/bool.h"
 #include "src/tint/lang/core/type/f16.h"
 #include "src/tint/lang/core/type/f32.h"
@@ -1169,6 +1170,12 @@ class Validator {
     /// @param call the call to validate
     void CheckBuiltinCall(const BuiltinCall* call);
 
+    /// Validates a core builtin call
+    /// @param call the call to validate
+    /// @param overload the call intrinsic overload
+    void CheckCoreBuiltinCall(const CoreBuiltinCall* call,
+                              const core::intrinsic::Overload& overload);
+
     /// Validates the given member builtin call
     /// @param call the member call to validate
     void CheckMemberBuiltinCall(const MemberBuiltinCall* call);
@@ -2070,6 +2077,20 @@ void Validator::CheckType(const core::type::Type* root,
                                    core::type::I32, core::type::U8, core::type::U32>()) {
                     diag() << "invalid subgroup matrix component type: " << NameOf(m->Type());
                     return false;
+                }
+                return true;
+            },
+            [&](const core::type::BindingArray* t) {
+                if (!t->Count()->Is<core::type::ConstantArrayCount>()) {
+                    diag() << "binding_array count must be a constant expression";
+                    return false;
+                }
+
+                if (!capabilities_.Contains(Capability::kAllowNonCoreTypes)) {
+                    if (!t->ElemType()->Is<core::type::SampledTexture>()) {
+                        diag() << "binding_array element type must be a sampled texture type";
+                        return false;
+                    }
                 }
                 return true;
             },
@@ -3102,6 +3123,61 @@ void Validator::CheckBuiltinCall(const BuiltinCall* call) {
                        << " does not match builtin return type " << NameOf(builtin->return_type);
         return;
     }
+
+    if (auto* bc = call->As<CoreBuiltinCall>()) {
+        CheckCoreBuiltinCall(bc, builtin.Get());
+    }
+}
+
+void Validator::CheckCoreBuiltinCall(const CoreBuiltinCall* call,
+                                     const core::intrinsic::Overload& overload) {
+    auto idx_for_usage = [&](core::ParameterUsage usage) -> std::optional<uint32_t> {
+        for (uint32_t i = 0; i < overload.parameters.Length(); ++i) {
+            auto& p = overload.parameters[i];
+            if (p.usage == usage) {
+                return int32_t(i);
+            }
+        }
+        return std::nullopt;
+    };
+
+    auto check_arg_in_range = [&](core::ParameterUsage usage, int32_t min, int32_t max) {
+        auto idx_opt = idx_for_usage(usage);
+        if (!idx_opt.has_value()) {
+            return;
+        }
+        uint32_t idx = idx_opt.value();
+        TINT_ASSERT(idx < call->Args().Length());
+
+        auto* val = call->Args()[idx];
+        if (auto* const_val = val->As<ir::Constant>()) {
+            auto* cnst = const_val->Value();
+
+            if (val->Type()->Is<core::type::Vector>()) {
+                for (size_t i = 0; i < cnst->NumElements(); i++) {
+                    auto value = cnst->Index(i)->ValueAs<int32_t>();
+                    if (value < min || value > max) {
+                        AddError(call, idx)
+                            << value << " outside range of [" << min << ", " << max << "]";
+                        return;
+                    }
+                }
+            } else {
+                auto value = cnst->ValueAs<int32_t>();
+                if (value < min || value > max) {
+                    AddError(call, idx)
+                        << value << " outside range of [" << min << ", " << max << "]";
+                    return;
+                }
+            }
+        } else {
+            AddError(call, idx) << "expected a constant value";
+            return;
+        }
+    };
+
+    check_arg_in_range(core::ParameterUsage::kComponent, 0, 3);
+    check_arg_in_range(core::ParameterUsage::kOffset, -8, 7);
 }
 
 void Validator::CheckMemberBuiltinCall(const MemberBuiltinCall* call) {
@@ -3413,6 +3489,15 @@ void Validator::CheckBinary(const Binary* b) {
         return;
     }
 
+    if (b->Op() == core::BinaryOp::kLogicalAnd) {
+        AddError(b) << "logical-and is not valid in the IR";
+        return;
+    }
+    if (b->Op() == core::BinaryOp::kLogicalOr) {
+        AddError(b) << "logical-or is not valid in the IR";
+        return;
+    }
+
     if (b->LHS() && b->RHS()) {
         intrinsic::Context context{b->TableData(), type_mgr_, symbols_};
 
@@ -3461,10 +3546,17 @@ void Validator::CheckUnary(const Unary* u) {
 
 void Validator::CheckIf(const If* if_) {
     CheckResults(if_);
-    CheckOperand(if_, If::kConditionOperandOffset);
+    CheckOperands(if_, If::kNumOperands);
 
     if (if_->Condition() && !if_->Condition()->Type()->Is<core::type::Bool>()) {
         AddError(if_, If::kConditionOperandOffset) << "condition type must be 'bool'";
+    }
+
+    if (if_->False() && if_->False()->Is<core::ir::MultiInBlock>()) {
+        AddError(if_) << "if false block must be a block";
+    }
+    if (if_->True() && if_->True()->Is<core::ir::MultiInBlock>()) {
+        AddError(if_) << "if true block must be a block";
     }
 
     tasks_.Push([this] { control_stack_.Pop(); });
@@ -3563,7 +3655,7 @@ void Validator::CheckLoopContinuing(const Loop* loop) {
 
 void Validator::CheckSwitch(const Switch* s) {
     CheckResults(s);
-    CheckOperand(s, Switch::kConditionOperandOffset);
+    CheckOperands(s, Switch::kNumOperands);
 
     if (s->Condition() && !s->Condition()->Type()->IsIntegerScalar()) {
         auto* cond_ty = s->Condition() ? s->Condition()->Type() : nullptr;
@@ -3575,6 +3667,10 @@ void Validator::CheckSwitch(const Switch* s) {
 
     bool found_default = false;
     for (auto& cse : s->Cases()) {
+        if (cse.block->Is<core::ir::MultiInBlock>()) {
+            AddError(s) << "case block must be a block";
+        }
+
         QueueBlock(cse.block);
 
         for (const auto& sel : cse.selectors) {

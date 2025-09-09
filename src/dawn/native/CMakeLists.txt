@@ -585,6 +585,8 @@ if (DAWN_ENABLE_WEBGPU_ON_WEBGPU)
     )
     list(APPEND private_headers
         "webgpu/BackendWGPU.h"
+        "webgpu/BindGroupWGPU.h"
+        "webgpu/BindGroupLayoutWGPU.h"
         "webgpu/BufferWGPU.h"
         "webgpu/CommandBufferWGPU.h"
         "webgpu/DeviceWGPU.h"
@@ -592,16 +594,20 @@ if (DAWN_ENABLE_WEBGPU_ON_WEBGPU)
         "webgpu/ObjectWGPU.h"
         "webgpu/PhysicalDeviceWGPU.h"
         "webgpu/QueueWGPU.h"
+        "webgpu/ShaderModuleWGPU.h"
         "webgpu/TextureWGPU.h"
         "webgpu/WebGPUError.h"
     )
     list(APPEND sources
         "webgpu/BackendWGPU.cpp"
+        "webgpu/BindGroupWGPU.cpp"
+        "webgpu/BindGroupLayoutWGPU.cpp"
         "webgpu/BufferWGPU.cpp"
         "webgpu/CommandBufferWGPU.cpp"
         "webgpu/DeviceWGPU.cpp"
         "webgpu/PhysicalDeviceWGPU.cpp"
         "webgpu/QueueWGPU.cpp"
+        "webgpu/ShaderModuleWGPU.cpp"
         "webgpu/TextureWGPU.cpp"
     )
 endif()

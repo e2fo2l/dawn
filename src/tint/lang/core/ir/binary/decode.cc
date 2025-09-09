@@ -877,6 +877,10 @@ struct Decoder {
                  << internal_limits::kMaxArrayElementCount << "\n";
             return mod_out_.Types().invalid();
         }
+        if (element == nullptr) {
+            err_ << "array element type is invalid\n";
+            return mod_out_.Types().invalid();
+        }
 
         return count > 0 ? mod_out_.Types().array(element, count)
                          : mod_out_.Types().runtime_array(element);
@@ -931,15 +935,27 @@ struct Decoder {
         return mod_out_.Types().depth_multisampled_texture(dimension);
     }
 
-    const type::StorageTexture* CreateTypeStorageTexture(const pb::TypeStorageTexture& texture_in) {
+    const type::Type* CreateTypeStorageTexture(const pb::TypeStorageTexture& texture_in) {
         auto dimension = TextureDimension(texture_in.dimension());
         auto texel_format = TexelFormat(texture_in.texel_format());
+        auto sub_ty = mod_out_.Types().SubtypeFor(texel_format);
+        if (!sub_ty) {
+            err_ << "unable to create a sub-type for " << texel_format << "\n";
+            return mod_out_.Types().invalid();
+        }
+
         auto access = AccessControl(texture_in.access());
         return mod_out_.Types().storage_texture(dimension, texel_format, access);
     }
 
-    const type::TexelBuffer* CreateTypeTexelBuffer(const pb::TypeTexelBuffer& buffer_in) {
+    const type::Type* CreateTypeTexelBuffer(const pb::TypeTexelBuffer& buffer_in) {
         auto texel_format = TexelFormat(buffer_in.texel_format());
+        auto sub_ty = mod_out_.Types().SubtypeFor(texel_format);
+        if (!sub_ty) {
+            err_ << "unable to create a sub-type for " << texel_format << "\n";
+            return mod_out_.Types().invalid();
+        }
+
         auto access = AccessControl(buffer_in.access());
         return mod_out_.Types().texel_buffer(texel_format, access);
     }
@@ -977,51 +993,80 @@ struct Decoder {
         }
 
         auto& ty = mod_out_.Types();
+        const core::type::Struct* res = nullptr;
         switch (builtin_struct_in) {
             case pb::TypeBuiltinStruct::AtomicCompareExchangeResultI32:
-                return type::CreateAtomicCompareExchangeResult(ty, mod_out_.symbols, ty.i32());
+                res = type::CreateAtomicCompareExchangeResult(ty, mod_out_.symbols, ty.i32());
+                break;
             case pb::TypeBuiltinStruct::AtomicCompareExchangeResultU32:
-                return type::CreateAtomicCompareExchangeResult(ty, mod_out_.symbols, ty.u32());
+                res = type::CreateAtomicCompareExchangeResult(ty, mod_out_.symbols, ty.u32());
+                break;
             case pb::TypeBuiltinStruct::FrexpResultF16:
-                return type::CreateFrexpResult(ty, mod_out_.symbols, ty.f16());
+                res = type::CreateFrexpResult(ty, mod_out_.symbols, ty.f16());
+                break;
             case pb::TypeBuiltinStruct::FrexpResultF32:
-                return type::CreateFrexpResult(ty, mod_out_.symbols, ty.f32());
+                res = type::CreateFrexpResult(ty, mod_out_.symbols, ty.f32());
+                break;
             case pb::TypeBuiltinStruct::FrexpResultVec2F16:
-                return type::CreateFrexpResult(ty, mod_out_.symbols, ty.vec2<f16>());
+                res = type::CreateFrexpResult(ty, mod_out_.symbols, ty.vec2<f16>());
+                break;
             case pb::TypeBuiltinStruct::FrexpResultVec2F32:
-                return type::CreateFrexpResult(ty, mod_out_.symbols, ty.vec2<f32>());
+                res = type::CreateFrexpResult(ty, mod_out_.symbols, ty.vec2<f32>());
+                break;
             case pb::TypeBuiltinStruct::FrexpResultVec3F16:
-                return type::CreateFrexpResult(ty, mod_out_.symbols, ty.vec3<f16>());
+                res = type::CreateFrexpResult(ty, mod_out_.symbols, ty.vec3<f16>());
+                break;
             case pb::TypeBuiltinStruct::FrexpResultVec3F32:
-                return type::CreateFrexpResult(ty, mod_out_.symbols, ty.vec3<f32>());
+                res = type::CreateFrexpResult(ty, mod_out_.symbols, ty.vec3<f32>());
+                break;
             case pb::TypeBuiltinStruct::FrexpResultVec4F16:
-                return type::CreateFrexpResult(ty, mod_out_.symbols, ty.vec4<f16>());
+                res = type::CreateFrexpResult(ty, mod_out_.symbols, ty.vec4<f16>());
+                break;
             case pb::TypeBuiltinStruct::FrexpResultVec4F32:
-                return type::CreateFrexpResult(ty, mod_out_.symbols, ty.vec4<f32>());
+                res = type::CreateFrexpResult(ty, mod_out_.symbols, ty.vec4<f32>());
+                break;
             case pb::TypeBuiltinStruct::ModfResultF16:
-                return type::CreateModfResult(ty, mod_out_.symbols, ty.f16());
+                res = type::CreateModfResult(ty, mod_out_.symbols, ty.f16());
+                break;
             case pb::TypeBuiltinStruct::ModfResultF32:
-                return type::CreateModfResult(ty, mod_out_.symbols, ty.f32());
+                res = type::CreateModfResult(ty, mod_out_.symbols, ty.f32());
+                break;
             case pb::TypeBuiltinStruct::ModfResultVec2F16:
-                return type::CreateModfResult(ty, mod_out_.symbols, ty.vec2<f16>());
+                res = type::CreateModfResult(ty, mod_out_.symbols, ty.vec2<f16>());
+                break;
             case pb::TypeBuiltinStruct::ModfResultVec2F32:
-                return type::CreateModfResult(ty, mod_out_.symbols, ty.vec2<f32>());
+                res = type::CreateModfResult(ty, mod_out_.symbols, ty.vec2<f32>());
+                break;
             case pb::TypeBuiltinStruct::ModfResultVec3F16:
-                return type::CreateModfResult(ty, mod_out_.symbols, ty.vec2<f16>());
+                res = type::CreateModfResult(ty, mod_out_.symbols, ty.vec2<f16>());
+                break;
             case pb::TypeBuiltinStruct::ModfResultVec3F32:
-                return type::CreateModfResult(ty, mod_out_.symbols, ty.vec3<f32>());
+                res = type::CreateModfResult(ty, mod_out_.symbols, ty.vec3<f32>());
+                break;
             case pb::TypeBuiltinStruct::ModfResultVec4F16:
-                return type::CreateModfResult(ty, mod_out_.symbols, ty.vec2<f16>());
+                res = type::CreateModfResult(ty, mod_out_.symbols, ty.vec2<f16>());
+                break;
             case pb::TypeBuiltinStruct::ModfResultVec4F32:
-                return type::CreateModfResult(ty, mod_out_.symbols, ty.vec4<f32>());
+                res = type::CreateModfResult(ty, mod_out_.symbols, ty.vec4<f32>());
+                break;
 
             case pb::TypeBuiltinStruct::TypeBuiltinStruct_INT_MIN_SENTINEL_DO_NOT_USE_:
             case pb::TypeBuiltinStruct::TypeBuiltinStruct_INT_MAX_SENTINEL_DO_NOT_USE_:
                 break;
         }
 
-        err_ << "invalid TypeBuiltinStruct: " << std::to_string(builtin_struct_in) << "\n";
-        return mod_out_.Types().invalid();
+        if (!res) {
+            err_ << "invalid TypeBuiltinStruct: " << std::to_string(builtin_struct_in) << "\n";
+            return mod_out_.Types().invalid();
+        }
+
+        // Make sure this struct name wasn't already used by another struct in the module.
+        auto struct_name = res->Name().Name();
+        if (!struct_names_.Add(struct_name)) {
+            err_ << "duplicate struct name: " << struct_name << "\n";
+            return mod_out_.Types().invalid();
+        }
+        return res;
     }
 
     const type::Type* Type(size_t id) {
@@ -1067,6 +1112,10 @@ struct Decoder {
 
     ir::InstructionResult* InstructionResult(const pb::InstructionResult& res_in) {
         auto* type = Type(res_in.type());
+        if (type == nullptr || type->Is<core::type::Invalid>()) {
+            err_ << "result '" << res_in.name() << "' has invalid type\n";
+            return nullptr;
+        }
         auto* res_out = b.InstructionResult(type);
         if (!res_in.name().empty()) {
             if (DAWN_UNLIKELY(res_in.name().find('\0') != std::string::npos)) {
@@ -1081,6 +1130,10 @@ struct Decoder {
 
     ir::FunctionParam* FunctionParameter(const pb::FunctionParameter& param_in) {
         auto* type = Type(param_in.type());
+        if (type == nullptr || type->Is<core::type::Invalid>()) {
+            err_ << "param '" << param_in.name() << "' has invalid type\n";
+            return nullptr;
+        }
         auto* param_out = b.FunctionParam(type);
         if (!param_in.name().empty()) {
             if (DAWN_UNLIKELY(param_in.name().find('\0') != std::string::npos)) {
@@ -1119,6 +1172,10 @@ struct Decoder {
 
     ir::BlockParam* BlockParameter(const pb::BlockParameter& param_in) {
         auto* type = Type(param_in.type());
+        if (type == nullptr || type->Is<core::type::Invalid>()) {
+            err_ << "block parameter '" << param_in.name() << "' has invalid type\n";
+            return nullptr;
+        }
         auto* param_out = b.BlockParam(type);
         if (!param_in.name().empty()) {
             if (DAWN_UNLIKELY(param_in.name().find('\0') != std::string::npos)) {

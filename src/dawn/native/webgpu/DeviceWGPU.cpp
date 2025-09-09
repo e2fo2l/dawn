@@ -51,10 +51,13 @@
 #include "dawn/native/SwapChain.h"
 #include "dawn/native/Texture.h"
 #include "dawn/native/webgpu/BackendWGPU.h"
+#include "dawn/native/webgpu/BindGroupLayoutWGPU.h"
+#include "dawn/native/webgpu/BindGroupWGPU.h"
 #include "dawn/native/webgpu/BufferWGPU.h"
 #include "dawn/native/webgpu/CommandBufferWGPU.h"
 #include "dawn/native/webgpu/PhysicalDeviceWGPU.h"
 #include "dawn/native/webgpu/QueueWGPU.h"
+#include "dawn/native/webgpu/ShaderModuleWGPU.h"
 #include "dawn/native/webgpu/TextureWGPU.h"
 
 #include "tint/tint.h"
@@ -128,14 +131,11 @@ MaybeError Device::Initialize(const UnpackedPtr<DeviceDescriptor>& descriptor) {
 
 ResultOrError<Ref<BindGroupBase>> Device::CreateBindGroupImpl(
     const UnpackedPtr<BindGroupDescriptor>& descriptor) {
-    return Ref<BindGroupBase>{nullptr};
+    return BindGroup::Create(this, descriptor);
 }
 ResultOrError<Ref<BindGroupLayoutInternalBase>> Device::CreateBindGroupLayoutImpl(
     const UnpackedPtr<BindGroupLayoutDescriptor>& descriptor) {
-    // TODO(crbug.com/413053623): Replace with webgpu::BindGroupLayout object.
-    // This placeholder implementation is needed because device is creating empty BindGroupLayout
-    // and getting content hash.
-    return AcquireRef(new BindGroupLayoutInternalBase(this, descriptor));
+    return BindGroupLayout::Create(this, descriptor);
 }
 ResultOrError<Ref<BufferBase>> Device::CreateBufferImpl(
     const UnpackedPtr<BufferDescriptor>& descriptor) {
@@ -173,7 +173,7 @@ ResultOrError<Ref<ShaderModuleBase>> Device::CreateShaderModuleImpl(
     const UnpackedPtr<ShaderModuleDescriptor>& descriptor,
     const std::vector<tint::wgsl::Extension>& internalExtensions,
     ShaderModuleParseResult* parseResult) {
-    return Ref<ShaderModuleBase>{nullptr};
+    return ShaderModule::Create(this, descriptor, internalExtensions, parseResult);
 }
 ResultOrError<Ref<SwapChainBase>> Device::CreateSwapChainImpl(Surface* surface,
                                                               SwapChainBase* previousSwapChain,

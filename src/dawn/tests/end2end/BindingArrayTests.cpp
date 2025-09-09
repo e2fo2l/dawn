@@ -25,8 +25,11 @@
 // OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+#include <string>
+#include <unordered_set>
 #include <vector>
 
+#include "dawn/common/Enumerator.h"
 #include "dawn/tests/DawnTest.h"
 #include "dawn/utils/ComboRenderPipelineDescriptor.h"
 #include "dawn/utils/WGPUHelpers.h"
@@ -689,6 +692,75 @@ class DynamicBindingArrayTests : public DawnTest {
 
         return device.CreateBindGroup(&descriptor);
     }
+
+    // Test that `dynamicArray` (with layout `bgl` and `dynamicArrayStart`), has bindings of
+    // `wgslType` in the `expected` slots.
+    void TestHasBinding(wgpu::BindGroupLayout bgl,
+                        wgpu::BindGroup dynamicArray,
+                        std::vector<bool> expected,
+                        uint32_t dynamicArrayStart = 0,
+                        std::string wgslType = "texture_2d<f32>") {
+        // Create the test pipeline.
+        std::array<wgpu::BindGroupLayout, 2> bgls = {
+            bgl,
+            utils::MakeBindGroupLayout(
+                device, {{0, wgpu::ShaderStage::Compute, wgpu::BufferBindingType::Storage}}),
+        };
+        wgpu::PipelineLayoutDescriptor plDesc = {
+            .bindGroupLayoutCount = 2,
+            .bindGroupLayouts = bgls.data(),
+        };
+
+        wgpu::ShaderModule module =
+            utils::CreateShaderModule(device, R"(
+            enable chromium_experimental_dynamic_binding;
+            @group(0) @binding()" + std::to_string(dynamicArrayStart) +
+                                                  R"() var bindings : resource_binding;
+            @group(1) @binding(0) var<storage, read_write> results : array<u32>;
+
+            @compute @workgroup_size(1) fn main() {
+                for (var i = 0u; i < arrayLength(bindings); i++) {
+                    results[i] = u32(hasBinding<)" +
+                                                  wgslType + R"(>(bindings, i));
+                }
+            }
+        )");
+
+        wgpu::ComputePipelineDescriptor csDesc = {.layout = device.CreatePipelineLayout(&plDesc),
+                                                  .compute = {
+                                                      .module = module,
+                                                  }};
+        wgpu::ComputePipeline testPipeline = device.CreateComputePipeline(&csDesc);
+
+        // Create the result buffer.
+        wgpu::BufferDescriptor bDesc = {
+            .usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc,
+            .size = sizeof(uint32_t) * expected.size(),
+        };
+        wgpu::Buffer resultBuffer = device.CreateBuffer(&bDesc);
+        wgpu::BindGroup resultBG = utils::MakeBindGroup(device, bgls[1], {{0, resultBuffer}});
+
+        // Run the test.
+        wgpu::CommandEncoder encoder = device.CreateCommandEncoder();
+        wgpu::ComputePassEncoder pass = encoder.BeginComputePass();
+        pass.SetBindGroup(0, dynamicArray);
+        pass.SetBindGroup(1, resultBG);
+        pass.SetPipeline(testPipeline);
+        pass.DispatchWorkgroups(1);
+        pass.End();
+
+        wgpu::CommandBuffer commands = encoder.Finish();
+        device.GetQueue().Submit(1, &commands);
+
+        // Check we have the expected results.
+        std::vector<uint32_t> expectedU32;
+        for (bool b : expected) {
+            expectedU32.push_back(b ? 1u : 0u);
+        }
+
+        EXPECT_BUFFER_U32_RANGE_EQ(expectedU32.data(), resultBuffer, 0, expectedU32.size())
+            << " for WGSL type " << wgslType;
+    }
 };
 
 // Tests that creating the bind group that's only a dynamic array doesn't crash in backends.
@@ -809,6 +881,618 @@ TEST_P(DynamicBindingArrayTests, PinningBalancedInBackends) {
 // arrays, add tests that pinning handles lazy clearing:
 //  - Check that a newly created resource that's pinned samples as zeroes.
 //  - Likewise for a texture written to, then discarded with a render pass.
+
+// Test that the WGSL `arrayLength` builtin on dynamic binding arrays returns the correct length.
+TEST_P(DynamicBindingArrayTests, ArrayLengthBuiltin) {
+    // Create a compute pipeline that returns the array length of the dynamic binding arrays.
+    // One of them has a static binding as well so as to check that it doesn't mess up the
+    // computation of the array length.
+    wgpu::ShaderModule module = utils::CreateShaderModule(device, R"(
+        enable chromium_experimental_dynamic_binding;
+
+        @group(0) @binding(0) var<storage, read_write> result : array<u32, 2>;
+        @group(0) @binding(1) var firstBindings : resource_binding;
+        @group(1) @binding(0) var secondBindings : resource_binding;
+
+        @compute @workgroup_size(1) fn getArrayLengths() {
+            // Force the defaulted layout to wgpu::DynamicBindingKind::SampledTexture
+            _ = hasBinding<texture_2d<f32>>(firstBindings, 0);
+            _ = hasBinding<texture_2d<f32>>(secondBindings, 0);
+
+            result[0] = arrayLength(firstBindings);
+            result[1] = arrayLength(secondBindings);
+        }
+    )");
+    wgpu::ComputePipelineDescriptor csDesc = {.compute = {
+                                                  .module = module,
+                                              }};
+    wgpu::ComputePipeline pipeline = device.CreateComputePipeline(&csDesc);
+
+    // Create the dynamic binding arrays and fetch their array length in a buffer.
+    wgpu::BufferDescriptor bDesc = {
+        .usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc,
+        .size = 2 * sizeof(uint32_t),
+    };
+    wgpu::Buffer resultBuffer = device.CreateBuffer(&bDesc);
+
+    wgpu::BindGroup bg0 = MakeBindGroup(pipeline.GetBindGroupLayout(0), 17, {{0, resultBuffer}});
+    wgpu::BindGroup bg1 = MakeBindGroup(pipeline.GetBindGroupLayout(1), 3, {});
+
+    wgpu::CommandEncoder encoder = device.CreateCommandEncoder();
+    wgpu::ComputePassEncoder pass = encoder.BeginComputePass();
+    pass.SetBindGroup(0, bg0);
+    pass.SetBindGroup(1, bg1);
+    pass.SetPipeline(pipeline);
+    pass.DispatchWorkgroups(1);
+    pass.End();
+
+    wgpu::CommandBuffer commands = encoder.Finish();
+    device.GetQueue().Submit(1, &commands);
+
+    // The result buffer should contain the lengths of the dynamic binding arrays.
+    EXPECT_BUFFER_U32_EQ(17, resultBuffer, 0);
+    EXPECT_BUFFER_U32_EQ(3, resultBuffer, 4);
+}
+
+// Test WGSL `hasBinding` reflects the state of a dynamic binding array.
+TEST_P(DynamicBindingArrayTests, HasBindingOneTexturePinUnpin) {
+    wgpu::TextureDescriptor tDesc{
+        .usage = wgpu::TextureUsage::TextureBinding,
+        .size = {1, 1},
+        .format = wgpu::TextureFormat::R32Float,
+    };
+    wgpu::Texture tex = device.CreateTexture(&tDesc);
+
+    wgpu::BindGroupLayout bgl = MakeBindGroupLayout(wgpu::DynamicBindingKind::SampledTexture);
+    wgpu::BindGroup bg = MakeBindGroup(bgl, 3, {{1, tex.CreateView()}});
+
+    // Before pinning, the bind group has no valid entries.
+    TestHasBinding(bgl, bg, {false, false, false});
+
+    // After pinning it has the one valid entry valid.
+    tex.Pin(wgpu::TextureUsage::TextureBinding);
+    TestHasBinding(bgl, bg, {false, true, false});
+
+    // After unpinning it has the no more valid entries.
+    tex.Unpin();
+    TestHasBinding(bgl, bg, {false, false, false});
+}
+
+// Test pin/unpin updating the availability takes into account the static bindings (so even if it
+// doesn't start at BindingIndex 0, things still work)
+TEST_P(DynamicBindingArrayTests, HasBindingOneTexturePinUnpinWithStaticBindings) {
+    wgpu::TextureDescriptor tDesc{
+        .usage = wgpu::TextureUsage::TextureBinding,
+        .size = {1, 1},
+        .format = wgpu::TextureFormat::R32Float,
+    };
+    wgpu::Texture tex = device.CreateTexture(&tDesc);
+
+    wgpu::BindGroupLayout bgl = MakeBindGroupLayout(
+        wgpu::DynamicBindingKind::SampledTexture, 4,
+        {{0, wgpu::ShaderStage::Compute, wgpu::TextureSampleType::UnfilterableFloat}});
+    wgpu::BindGroup bg = MakeBindGroup(bgl, 3, {{0, tex.CreateView()}, {5, tex.CreateView()}});
+
+    // Before pinning, the bind group has no valid entries.
+    TestHasBinding(bgl, bg, {false, false, false}, 4);
+
+    // After pinning it has the one valid entry valid.
+    tex.Pin(wgpu::TextureUsage::TextureBinding);
+    TestHasBinding(bgl, bg, {false, true, false}, 4);
+
+    // After unpinning it has the no more valid entries.
+    tex.Unpin();
+    TestHasBinding(bgl, bg, {false, false, false}, 4);
+}
+
+// Test that calling texture.Destroy() implicitly unpins it.
+TEST_P(DynamicBindingArrayTests, HasBindingOneTexturePinDestroy) {
+    wgpu::TextureDescriptor tDesc{
+        .usage = wgpu::TextureUsage::TextureBinding,
+        .size = {1, 1},
+        .format = wgpu::TextureFormat::R32Float,
+    };
+    wgpu::Texture tex = device.CreateTexture(&tDesc);
+
+    wgpu::BindGroupLayout bgl = MakeBindGroupLayout(wgpu::DynamicBindingKind::SampledTexture);
+    wgpu::BindGroup bg = MakeBindGroup(bgl, 3, {{1, tex.CreateView()}});
+
+    // Before pinning, the bind group has no valid entries.
+    TestHasBinding(bgl, bg, {false, false, false});
+
+    // After pinning it has the one valid entry valid.
+    tex.Pin(wgpu::TextureUsage::TextureBinding);
+    TestHasBinding(bgl, bg, {false, true, false});
+
+    // After texture destruction it has the no more valid entries.
+    tex.Destroy();
+    TestHasBinding(bgl, bg, {false, false, false});
+}
+
+// Test that a texture used multiple times in the same dynamic binding array has its availability
+// correctly updated.
+TEST_P(DynamicBindingArrayTests, HasBindingSameTextureMultipleTimesPinUnpin) {
+    wgpu::TextureDescriptor tDesc{
+        .usage = wgpu::TextureUsage::TextureBinding,
+        .size = {1, 1},
+        .format = wgpu::TextureFormat::R32Float,
+    };
+    wgpu::Texture tex = device.CreateTexture(&tDesc);
+
+    wgpu::BindGroupLayout bgl = MakeBindGroupLayout(wgpu::DynamicBindingKind::SampledTexture);
+    wgpu::BindGroup bg = MakeBindGroup(bgl, 4, {{1, tex.CreateView()}, {3, tex.CreateView()}});
+
+    // Before pinning, the bind group has no valid entries.
+    TestHasBinding(bgl, bg, {false, false, false, false});
+
+    // After pinning it has valid entries.
+    tex.Pin(wgpu::TextureUsage::TextureBinding);
+    TestHasBinding(bgl, bg, {false, true, false, true});
+
+    // After unpinning it has the no more valid entries.
+    tex.Unpin();
+    TestHasBinding(bgl, bg, {false, false, false, false});
+}
+
+// Test that creating a dynamic binding array with an already destroyed texture works, but doesn't
+// show that entry as available.
+TEST_P(DynamicBindingArrayTests, HasBindingDynamicArrayCreatedWithTextureAlreadyDestroyed) {
+    wgpu::TextureDescriptor tDesc{
+        .usage = wgpu::TextureUsage::TextureBinding,
+        .size = {1, 1},
+        .format = wgpu::TextureFormat::R32Float,
+    };
+    wgpu::Texture tex = device.CreateTexture(&tDesc);
+    tex.Destroy();
+
+    wgpu::BindGroupLayout bgl = MakeBindGroupLayout(wgpu::DynamicBindingKind::SampledTexture);
+    wgpu::BindGroup bg = MakeBindGroup(bgl, 1, {{0, tex.CreateView()}});
+
+    // Before pinning, the bind group has no valid entries.
+    TestHasBinding(bgl, bg, {false});
+}
+
+// Test that a texture used multiple times in the same dynamic binding array has its
+// availability correctly updated.
+TEST_P(DynamicBindingArrayTests, HasBindingSameTextureMultipleDynamicArrays) {
+    wgpu::TextureDescriptor tDesc{
+        .usage = wgpu::TextureUsage::TextureBinding,
+        .size = {1, 1},
+        .format = wgpu::TextureFormat::R32Float,
+    };
+    wgpu::Texture tex = device.CreateTexture(&tDesc);
+
+    wgpu::BindGroupLayout bgl = MakeBindGroupLayout(wgpu::DynamicBindingKind::SampledTexture);
+    wgpu::BindGroup bg1 = MakeBindGroup(bgl, 3, {{1, tex.CreateView()}});
+    wgpu::BindGroup bg2 = MakeBindGroup(bgl, 1, {{0, tex.CreateView()}});
+
+    // Before pinning, the bind group has no valid entries.
+    TestHasBinding(bgl, bg1, {false, false, false});
+    TestHasBinding(bgl, bg2, {false});
+
+    // After pinning it has valid entries.
+    tex.Pin(wgpu::TextureUsage::TextureBinding);
+    TestHasBinding(bgl, bg1, {false, true, false});
+    TestHasBinding(bgl, bg2, {true});
+
+    // After destroying on dynamic binding array, the other still has the texture available.
+    bg1.Destroy();
+    TestHasBinding(bgl, bg2, {true});
+}
+
+// Test that texture availabililty is controlled per-texture.
+TEST_P(DynamicBindingArrayTests, HasBindingMultipleTexturesInDynamicArray) {
+    wgpu::TextureDescriptor tDesc{
+        .usage = wgpu::TextureUsage::TextureBinding,
+        .size = {1, 1},
+        .format = wgpu::TextureFormat::R32Float,
+    };
+    wgpu::Texture tex0 = device.CreateTexture(&tDesc);
+    wgpu::Texture tex1 = device.CreateTexture(&tDesc);
+
+    wgpu::BindGroupLayout bgl = MakeBindGroupLayout(wgpu::DynamicBindingKind::SampledTexture);
+    wgpu::BindGroup bg = MakeBindGroup(bgl, 2, {{0, tex0.CreateView()}, {1, tex1.CreateView()}});
+
+    // Before pinning, the bind group has no valid entries.
+    TestHasBinding(bgl, bg, {false, false});
+
+    // After pinning tex0 it has one valid entry.
+    tex0.Pin(wgpu::TextureUsage::TextureBinding);
+    TestHasBinding(bgl, bg, {true, false});
+
+    // After pinning tex1 it has two valid entries.
+    tex1.Pin(wgpu::TextureUsage::TextureBinding);
+    TestHasBinding(bgl, bg, {true, true});
+
+    // After unpinning tex0 it has only one valid entry.
+    tex0.Unpin();
+    TestHasBinding(bgl, bg, {false, true});
+}
+
+constexpr auto kWgslSampledTextureTypes = std::array{
+    "texture_1d<f32>",
+    "texture_1d<i32>",
+    "texture_1d<u32>",
+    "texture_2d<f32>",
+    "texture_2d<i32>",
+    "texture_2d<u32>",
+    "texture_2d_array<f32>",
+    "texture_2d_array<i32>",
+    "texture_2d_array<u32>",
+    "texture_cube<f32>",
+    "texture_cube<i32>",
+    "texture_cube<u32>",
+    "texture_cube_array<f32>",
+    "texture_cube_array<i32>",
+    "texture_cube_array<u32>",
+    "texture_3d<f32>",
+    "texture_3d<i32>",
+    "texture_3d<u32>",
+
+    "texture_multisampled_2d<f32>",
+    "texture_multisampled_2d<i32>",
+    "texture_multisampled_2d<u32>",
+
+    "texture_depth_2d",
+    "texture_depth_2d_array",
+    "texture_depth_cube",
+    "texture_depth_cube_array",
+    "texture_depth_multisampled_2d",
+};
+
+struct TextureDescForTypeIDCase {
+    std::unordered_set<std::string_view> wgslTypes;
+    wgpu::TextureFormat format;
+    wgpu::TextureDimension dimension;
+    wgpu::TextureViewDimension viewDimension = wgpu::TextureViewDimension::Undefined;
+    uint32_t sampleCount = 1;
+    wgpu::TextureAspect viewAspect = wgpu::TextureAspect::All;
+
+    // Create a view for a pinned texture for this case.
+    wgpu::TextureView CreateTestView(const wgpu::Device& device) {
+        wgpu::TextureDescriptor tDesc = {
+            .usage = wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopySrc,
+            .dimension = dimension,
+            .size = {1, 1, 1},
+            .format = format,
+            .sampleCount = sampleCount,
+        };
+        if (viewDimension == wgpu::TextureViewDimension::Cube ||
+            viewDimension == wgpu::TextureViewDimension::CubeArray) {
+            tDesc.size.depthOrArrayLayers = 6;
+        }
+        if (sampleCount != 1) {
+            tDesc.usage |= wgpu::TextureUsage::RenderAttachment;
+        }
+
+        wgpu::TextureViewDescriptor vDesc{
+            .dimension = viewDimension,
+            .aspect = viewAspect,
+            .usage = wgpu::TextureUsage::TextureBinding,
+        };
+
+        wgpu::Texture texture = device.CreateTexture(&tDesc);
+        texture.Pin(wgpu::TextureUsage::TextureBinding);
+        return texture.CreateView(&vDesc);
+    }
+};
+
+std::vector<TextureDescForTypeIDCase> MakeTextureDescForTypeIDCases() {
+    std::vector<TextureDescForTypeIDCase> cases;
+
+    // TODO(https://crbug.com/435317394): Add tests of filterable vs. unfilterable floats when
+    // get/hasBinding is able to make the difference.
+
+    // Regular 1D textures.
+    cases.push_back({
+        .wgslTypes = {{"texture_1d<f32>"}},
+        .format = wgpu::TextureFormat::RGBA32Float,
+        .dimension = wgpu::TextureDimension::e1D,
+    });
+    cases.push_back({
+        .wgslTypes = {{"texture_1d<i32>"}},
+        .format = wgpu::TextureFormat::RGBA32Sint,
+        .dimension = wgpu::TextureDimension::e1D,
+    });
+    cases.push_back({
+        .wgslTypes = {{"texture_1d<u32>"}},
+        .format = wgpu::TextureFormat::RGBA32Uint,
+        .dimension = wgpu::TextureDimension::e1D,
+    });
+
+    // Regular 2D textures.
+    cases.push_back({
+        .wgslTypes = {{"texture_2d<f32>"}},
+        .format = wgpu::TextureFormat::RGBA32Float,
+        .dimension = wgpu::TextureDimension::e2D,
+    });
+    cases.push_back({
+        .wgslTypes = {{"texture_2d<i32>"}},
+        .format = wgpu::TextureFormat::RGBA32Sint,
+        .dimension = wgpu::TextureDimension::e2D,
+    });
+    cases.push_back({
+        .wgslTypes = {{"texture_2d<u32>"}},
+        .format = wgpu::TextureFormat::RGBA32Uint,
+        .dimension = wgpu::TextureDimension::e2D,
+    });
+
+    // Regular 2D array textures.
+    cases.push_back({
+        .wgslTypes = {{"texture_2d_array<f32>"}},
+        .format = wgpu::TextureFormat::RGBA32Float,
+        .dimension = wgpu::TextureDimension::e2D,
+        .viewDimension = wgpu::TextureViewDimension::e2DArray,
+    });
+    cases.push_back({
+        .wgslTypes = {{"texture_2d_array<i32>"}},
+        .format = wgpu::TextureFormat::RGBA32Sint,
+        .dimension = wgpu::TextureDimension::e2D,
+        .viewDimension = wgpu::TextureViewDimension::e2DArray,
+    });
+    cases.push_back({
+        .wgslTypes = {{"texture_2d_array<u32>"}},
+        .format = wgpu::TextureFormat::RGBA32Uint,
+        .dimension = wgpu::TextureDimension::e2D,
+        .viewDimension = wgpu::TextureViewDimension::e2DArray,
+    });
+
+    // Regular cube textures.
+    cases.push_back({
+        .wgslTypes = {{"texture_cube<f32>"}},
+        .format = wgpu::TextureFormat::RGBA32Float,
+        .dimension = wgpu::TextureDimension::e2D,
+        .viewDimension = wgpu::TextureViewDimension::Cube,
+    });
+    cases.push_back({
+        .wgslTypes = {{"texture_cube<i32>"}},
+        .format = wgpu::TextureFormat::RGBA32Sint,
+        .dimension = wgpu::TextureDimension::e2D,
+        .viewDimension = wgpu::TextureViewDimension::Cube,
+    });
+    cases.push_back({
+        .wgslTypes = {{"texture_cube<u32>"}},
+        .format = wgpu::TextureFormat::RGBA32Uint,
+        .dimension = wgpu::TextureDimension::e2D,
+        .viewDimension = wgpu::TextureViewDimension::Cube,
+    });
+
+    // Regular cube array textures.
+    cases.push_back({
+        .wgslTypes = {{"texture_cube_array<f32>"}},
+        .format = wgpu::TextureFormat::RGBA32Float,
+        .dimension = wgpu::TextureDimension::e2D,
+        .viewDimension = wgpu::TextureViewDimension::CubeArray,
+    });
+    cases.push_back({
+        .wgslTypes = {{"texture_cube_array<i32>"}},
+        .format = wgpu::TextureFormat::RGBA32Sint,
+        .dimension = wgpu::TextureDimension::e2D,
+        .viewDimension = wgpu::TextureViewDimension::CubeArray,
+    });
+    cases.push_back({
+        .wgslTypes = {{"texture_cube_array<u32>"}},
+        .format = wgpu::TextureFormat::RGBA32Uint,
+        .dimension = wgpu::TextureDimension::e2D,
+        .viewDimension = wgpu::TextureViewDimension::CubeArray,
+    });
+
+    // Regular 3d textures.
+    cases.push_back({
+        .wgslTypes = {{"texture_3d<f32>"}},
+        .format = wgpu::TextureFormat::RGBA32Float,
+        .dimension = wgpu::TextureDimension::e3D,
+    });
+    cases.push_back({
+        .wgslTypes = {{"texture_3d<i32>"}},
+        .format = wgpu::TextureFormat::RGBA32Sint,
+        .dimension = wgpu::TextureDimension::e3D,
+    });
+    cases.push_back({
+        .wgslTypes = {{"texture_3d<u32>"}},
+        .format = wgpu::TextureFormat::RGBA32Uint,
+        .dimension = wgpu::TextureDimension::e3D,
+    });
+
+    // Color multisampled textures.
+    cases.push_back({
+        .wgslTypes = {{"texture_multisampled_2d<f32>"}},
+        .format = wgpu::TextureFormat::RGBA16Float,
+        .dimension = wgpu::TextureDimension::e2D,
+        .sampleCount = 4,
+    });
+    cases.push_back({
+        .wgslTypes = {{"texture_multisampled_2d<i32>"}},
+        .format = wgpu::TextureFormat::RGBA16Sint,
+        .dimension = wgpu::TextureDimension::e2D,
+        .sampleCount = 4,
+    });
+    cases.push_back({
+        .wgslTypes = {{"texture_multisampled_2d<u32>"}},
+        .format = wgpu::TextureFormat::RGBA16Uint,
+        .dimension = wgpu::TextureDimension::e2D,
+        .sampleCount = 4,
+    });
+
+    // Depth textures (including multisampled).
+    // TODO(https://crbug.com/435317394): In the future we should allow depth textures to be used as
+    // texture_*<f32>.
+    cases.push_back({
+        .wgslTypes = {{"texture_depth_2d"}},
+        .format = wgpu::TextureFormat::Depth32Float,
+        .dimension = wgpu::TextureDimension::e2D,
+    });
+    cases.push_back({
+        .wgslTypes = {{"texture_depth_2d_array"}},
+        .format = wgpu::TextureFormat::Depth32Float,
+        .dimension = wgpu::TextureDimension::e2D,
+        .viewDimension = wgpu::TextureViewDimension::e2DArray,
+    });
+    cases.push_back({
+        .wgslTypes = {{"texture_depth_cube"}},
+        .format = wgpu::TextureFormat::Depth32Float,
+        .dimension = wgpu::TextureDimension::e2D,
+        .viewDimension = wgpu::TextureViewDimension::Cube,
+    });
+    cases.push_back({
+        .wgslTypes = {{"texture_depth_cube_array"}},
+        .format = wgpu::TextureFormat::Depth32Float,
+        .dimension = wgpu::TextureDimension::e2D,
+        .viewDimension = wgpu::TextureViewDimension::CubeArray,
+    });
+    cases.push_back({
+        .wgslTypes = {{"texture_depth_multisampled_2d"}},
+        .format = wgpu::TextureFormat::Depth32Float,
+        .dimension = wgpu::TextureDimension::e2D,
+        .sampleCount = 4,
+    });
+
+    // Stencil textures can be used as 2D.
+    cases.push_back({
+        .wgslTypes = {{"texture_2d<u32>"}},
+        .format = wgpu::TextureFormat::Stencil8,
+        .dimension = wgpu::TextureDimension::e2D,
+    });
+    cases.push_back({
+        .wgslTypes = {{"texture_2d_array<u32>"}},
+        .format = wgpu::TextureFormat::Stencil8,
+        .dimension = wgpu::TextureDimension::e2D,
+        .viewDimension = wgpu::TextureViewDimension::e2DArray,
+    });
+    cases.push_back({
+        .wgslTypes = {{"texture_cube<u32>"}},
+        .format = wgpu::TextureFormat::Stencil8,
+        .dimension = wgpu::TextureDimension::e2D,
+        .viewDimension = wgpu::TextureViewDimension::Cube,
+    });
+    cases.push_back({
+        .wgslTypes = {{"texture_cube_array<u32>"}},
+        .format = wgpu::TextureFormat::Stencil8,
+        .dimension = wgpu::TextureDimension::e2D,
+        .viewDimension = wgpu::TextureViewDimension::CubeArray,
+    });
+
+    // Depth-stencil textures with only one aspect selected.
+    cases.push_back({
+        .wgslTypes = {{"texture_depth_2d"}},
+        .format = wgpu::TextureFormat::Depth24PlusStencil8,
+        .dimension = wgpu::TextureDimension::e2D,
+        .viewAspect = wgpu::TextureAspect::DepthOnly,
+    });
+    cases.push_back({
+        .wgslTypes = {{"texture_2d<u32>"}},
+        .format = wgpu::TextureFormat::Depth24PlusStencil8,
+        .dimension = wgpu::TextureDimension::e2D,
+        .viewAspect = wgpu::TextureAspect::StencilOnly,
+    });
+
+    return cases;
+}
+
+// TODO(https://crbug.com/435317394): When wgpu::BindGroup::Update() or equivalent is added, test
+// that availability is updated when entries in the dynamic binding array are updated.
+
+// Test that hasBinding() works as expected for all support types in WGSL.
+TEST_P(DynamicBindingArrayTests, HasBindingTextureCompatibilityAllTypes) {
+    auto textureCases = MakeTextureDescForTypeIDCases();
+
+    // Make a dynamic binding array with all of our test textures.
+    std::vector<wgpu::BindGroupEntry> entries;
+    for (auto [i, textureCase] : Enumerate(textureCases)) {
+        wgpu::BindGroupEntry entry{
+            .binding = uint32_t(i),
+            .textureView = textureCase.CreateTestView(device),
+        };
+        entries.push_back(entry);
+    }
+
+    wgpu::BindGroupLayout bgl = MakeBindGroupLayout(wgpu::DynamicBindingKind::SampledTexture);
+
+    wgpu::BindGroupDynamicBindingArray dynamic;
+    dynamic.dynamicArraySize = entries.size();
+
+    wgpu::BindGroupDescriptor bgDesc = {
+        .nextInChain = &dynamic,
+        .layout = bgl,
+        .entryCount = entries.size(),
+        .entries = entries.data(),
+    };
+    wgpu::BindGroup bg = device.CreateBindGroup(&bgDesc);
+
+    // Test hasBinding returning for each of the supported WGSL types, against each texture.
+    for (auto wgslType : kWgslSampledTextureTypes) {
+        std::vector<bool> expected;
+        for (auto textureCase : textureCases) {
+            expected.push_back(textureCase.wgslTypes.contains(wgslType));
+        }
+
+        TestHasBinding(bgl, bg, expected, 0, wgslType);
+    }
+}
+
+// Test that calling hasBinding() with values outside of [0, arrayLength) returns 0.
+TEST_P(DynamicBindingArrayTests, HasBindingOOBIsFalse) {
+    // Create the test pipeline
+    wgpu::ShaderModule module = utils::CreateShaderModule(device, R"(
+        enable chromium_experimental_dynamic_binding;
+
+        @group(0) @binding(0) var<storage, read_write> result : array<u32, 4>;
+        @group(0) @binding(1) var a : resource_binding;
+
+        @compute @workgroup_size(1) fn getArrayLengths() {
+            result[0] = u32(hasBinding<texture_2d<f32>>(a, arrayLength(a) - 1));
+            result[1] = u32(hasBinding<texture_2d<f32>>(a, arrayLength(a)));
+            result[2] = u32(hasBinding<texture_2d<f32>>(a, arrayLength(a) + 1)) +
+                        u32(hasBinding<texture_2d<f32>>(a, arrayLength(a) + 2)) +
+                        u32(hasBinding<texture_2d<f32>>(a, arrayLength(a) + 3)) +
+                        u32(hasBinding<texture_2d<f32>>(a, arrayLength(a) + 4));
+            result[3] = u32(hasBinding<texture_2d<f32>>(a, arrayLength(a) + 10000000));
+        }
+    )");
+    wgpu::ComputePipelineDescriptor csDesc = {.compute = {
+                                                  .module = module,
+                                              }};
+    wgpu::ComputePipeline pipeline = device.CreateComputePipeline(&csDesc);
+
+    // Create the test resources.
+    wgpu::BufferDescriptor bDesc = {
+        .usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc,
+        .size = 4 * sizeof(uint32_t),
+    };
+    wgpu::Buffer resultBuffer = device.CreateBuffer(&bDesc);
+
+    wgpu::TextureDescriptor tDesc{
+        .usage = wgpu::TextureUsage::TextureBinding,
+        .size = {1, 1},
+        .format = wgpu::TextureFormat::R32Float,
+    };
+    wgpu::Texture tex = device.CreateTexture(&tDesc);
+    tex.Pin(wgpu::TextureUsage::TextureBinding);
+
+    wgpu::BindGroup bg = MakeBindGroup(pipeline.GetBindGroupLayout(0), 3,
+                                       {
+                                           {0, resultBuffer},
+                                           {1, tex.CreateView()},
+                                           {2, tex.CreateView()},
+                                           {3, tex.CreateView()},
+                                       });
+
+    // Run the test and check results are the expected ones.
+    wgpu::CommandEncoder encoder = device.CreateCommandEncoder();
+    wgpu::ComputePassEncoder pass = encoder.BeginComputePass();
+    pass.SetBindGroup(0, bg);
+    pass.SetPipeline(pipeline);
+    pass.DispatchWorkgroups(1);
+    pass.End();
+
+    wgpu::CommandBuffer commands = encoder.Finish();
+    device.GetQueue().Submit(1, &commands);
+
+    EXPECT_BUFFER_U32_EQ(1, resultBuffer, 0);
+    EXPECT_BUFFER_U32_EQ(0, resultBuffer, 4);
+    EXPECT_BUFFER_U32_EQ(0, resultBuffer, 8);
+    EXPECT_BUFFER_U32_EQ(0, resultBuffer, 12);
+}
 
 DAWN_INSTANTIATE_TEST(DynamicBindingArrayTests, D3D12Backend(), MetalBackend(), VulkanBackend());
 
